@@ -113,11 +113,13 @@ def compute_crs(
         attention_explanation = f"Session behavioral-cue score = {attention_score_pct:.0f}%."
 
     if time_spent is None or time_limit is None:
-        integrity_value = 1.0
+        # SAP Sec. 11 / 9: missing timing defaults to a NEUTRAL 0.50 with a
+        # source flag. (Previously 1.0, which biased CRS toward "hard".)
+        integrity_value = 0.5
+        integrity_source = "default"
         integrity_explanation = (
-            "No timing data available yet (e.g. pre-assessment difficulty "
-            "selection) — integrity defaults to its maximum so it does not "
-            "penalize a student before they've answered anything."
+            "No timing data available (e.g. pre-assessment difficulty "
+            "selection) — neutral default (0.50), source=default."
         )
         integrity_detail: Optional[IntegrityResult] = None
     else:
@@ -128,6 +130,7 @@ def compute_crs(
             config=config.integrity,
         )
         integrity_value = integrity_detail.integrity_score
+        integrity_source = "measured"
         integrity_explanation = integrity_detail.reason
 
     trend_detail: TrendResult = compute_trend(recent_scores_pct, config.trend)
@@ -194,7 +197,11 @@ def compute_crs(
                 "explanation": attention_explanation,
             },
             "trend": asdict(trend_detail),
-            "integrity": asdict(integrity_detail) if integrity_detail else None,
+            "integrity": (
+                {**asdict(integrity_detail), "source": integrity_source}
+                if integrity_detail
+                else {"integrity_score": round(integrity_value, 4), "source": integrity_source}
+            ),
             "complexity": asdict(complexity_detail),
         },
     )

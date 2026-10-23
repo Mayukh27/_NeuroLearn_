@@ -168,7 +168,7 @@ class AttentionDetector:
             # Iris landmarks unavailable this frame — no measurement (B-3).
             return None, True
 
-    def _compute_head_pose(self, landmarks, w: int, h: int) -> str:
+    def _compute_head_pose(self, landmarks, w: int, h: int) -> Optional[str]:
         """
         Estimate head pose from key facial landmarks.
         Returns: "forward", "slightly_away", "away"
@@ -197,7 +197,8 @@ class AttentionDetector:
                 return "forward"
 
         except (IndexError, AttributeError):
-            return "forward"
+            # No measurement this frame — missing, not a substituted "forward" (13C.2).
+            return None
 
     def _update_blink_rate(self, ear: float) -> float:
         """Track blinks and compute rate (blinks per minute)."""
@@ -272,7 +273,11 @@ class AttentionDetector:
 
         # ── Aggregate behavioral_cue score ──
         # Head pose is steadier than iris tracking on low-resolution webcam frames.
-        head_score = {"forward": 1.0, "slightly_away": 0.65, "away": 0.2}[head_pose]
+        head_score = (
+            {"forward": 1.0, "slightly_away": 0.65, "away": 0.2}[head_pose]
+            if head_pose is not None
+            else None
+        )
         eye_open_score = max(
             0.0,
             min(1.0, (avg_ear - self._blink_threshold) / (0.28 - self._blink_threshold)),
@@ -305,6 +310,11 @@ class AttentionDetector:
         gaze_weight = 0.20
         head_weight = 0.45
         eye_open_weight = 0.30
+        # 13C.2: if head pose is missing, drop its term and renormalise the
+        # remaining weights rather than substituting a default pose.
+        if head_score is None:
+            head_weight = 0.0
+            head_score = 0.0
         total_weight = gaze_weight + head_weight + eye_open_weight
 
         raw_score = (
@@ -372,6 +382,7 @@ class AttentionDetector:
                 "eye_open": round(eye_open_score, 3),
                 "eyes_closed_duration": round(eyes_closed_duration, 1),
                 "head_pose": head_pose,
+                "head_pose_missing": head_pose is None,
                 "face_detected": True,
                 # Diagnostic only (FIX B-8) — not used in raw_score above,
                 # not a validated blink/closure measurement at 0.5 Hz.

@@ -204,9 +204,10 @@ def test_crs_fast_correct_lowers_crs_versus_thoughtful_correct():
 
 def test_crs_missing_timing_does_not_penalize_pre_assessment():
     """get_initial_difficulty's use case: no time_spent/time_limit yet —
-    integrity must default to neutral-maximum, not penalize."""
+    integrity must default to the neutral 0.50 (SAP Sec. 11), flagged."""
     result = compute_crs(recent_scores_pct=[70, 72, 71], attention_score_pct=70)
-    assert result.components.integrity == 1.0
+    assert result.components.integrity == 0.5
+    assert result.detail["integrity"]["source"] == "default"
 
 
 if __name__ == "__main__":

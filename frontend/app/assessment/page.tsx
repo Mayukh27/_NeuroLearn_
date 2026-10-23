@@ -60,13 +60,15 @@ function AssessmentContent() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isAdvancing, setIsAdvancing] = useState(false)
   const [timeRemaining, setTimeRemaining] = useState(0)
-  const [startTime] = useState(Date.now())
+  // FIX (13D.1): durations use a monotonic clock (performance.now()); wall-clock
+  // Date is kept only for human-readable ISO timestamps.
+  const [startTime] = useState(() => performance.now())
   const timerRef = useRef<NodeJS.Timeout | undefined>(undefined)
   // FIX (perf/timeout request, item 9): guards against finalizing twice —
   // e.g. the timer firing auto-submit at nearly the same moment the
   // in-flight 10th answer already completed the assessment.
   const hasFinalizedRef = useRef(false)
-  const questionPresentedAtRef = useRef<Record<string, number>>({})
+  const questionPresentedAtRef = useRef<Record<string, { mono: number; wall: number }>>({})
   const responseEventsRef = useRef<QuestionResponseEvent[]>([])
   const generationStartedRef = useRef(false)
 
@@ -134,7 +136,7 @@ function AssessmentContent() {
   useEffect(() => {
     const question = session?.questions[currentIdx]
     if (question && !questionPresentedAtRef.current[question.id]) {
-      questionPresentedAtRef.current[question.id] = Date.now()
+      questionPresentedAtRef.current[question.id] = { mono: performance.now(), wall: Date.now() }
     }
   }, [session, currentIdx])
 
@@ -168,7 +170,7 @@ function AssessmentContent() {
         session.id,
         answers,
         session.questions,
-        Math.round((Date.now() - startTime) / 1000),
+        Math.round((performance.now() - startTime) / 1000),
         responseEventsRef.current
       )
       const resultPayload = {
@@ -217,14 +219,16 @@ function AssessmentContent() {
 
   const handleAnswer = async (questionId: string, answer: string | number) => {
     if (!session || isSubmitting || isAdvancing || hasFinalizedRef.current) return
-    const presentedAt = questionPresentedAtRef.current[questionId] || Date.now()
+    const presentedRec = questionPresentedAtRef.current[questionId] || { mono: performance.now(), wall: Date.now() }
+    const presentedAt = presentedRec.wall
     const submittedAt = Date.now()
+    const elapsedMs = performance.now() - presentedRec.mono
     const responseEvent: QuestionResponseEvent = {
       questionId,
       questionIndex: currentIdx,
       presentedAt: new Date(presentedAt).toISOString(),
       submittedAt: new Date(submittedAt).toISOString(),
-      responseTimeSeconds: Math.max(0, Math.round((submittedAt - presentedAt) / 100) / 10),
+      responseTimeSeconds: Math.max(0, Math.round(elapsedMs / 100) / 10),
       status: "submitted",
     }
     responseEventsRef.current = [
