@@ -89,6 +89,9 @@ interface VideoPlayerProps {
   onTimeUpdate?: (currentTime: number, duration: number) => void
   onPlayStateChange?: (isPlaying: boolean) => void
   onVideoEnd?: () => void
+  /** Seconds to seek to once metadata loads (resume support). Applied
+   *  once per videoUrl change, not re-applied on every re-render. */
+  startAt?: number
 }
 
 export default function VideoPlayer({
@@ -97,6 +100,7 @@ export default function VideoPlayer({
   onTimeUpdate,
   onPlayStateChange,
   onVideoEnd,
+  startAt,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -159,7 +163,12 @@ export default function VideoPlayer({
       setCurrentTime(ct)
       onTimeUpdate?.(ct, dur)
     }
-    const onMeta = () => setDuration(video.duration)
+    const onMeta = () => {
+      setDuration(video.duration)
+      if (startAt && startAt > 1 && startAt < video.duration - 2) {
+        video.currentTime = startAt
+      }
+    }
     const onEnd = () => {
       setIsPlaying(false)
       onPlayStateChange?.(false)
@@ -184,8 +193,7 @@ export default function VideoPlayer({
       video.removeEventListener("canplay", onCanPlay)
       video.removeEventListener("error", onError)
     }
-  }, [videoType, videoUrl, onTimeUpdate, onPlayStateChange, onVideoEnd])
-  // ── YouTube IFrame Player API ──
+  }, [videoType, videoUrl, onTimeUpdate, onPlayStateChange, onVideoEnd, startAt])
   useEffect(() => {
     if (videoType !== "youtube") return
 

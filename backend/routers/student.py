@@ -13,9 +13,12 @@ identity from the JWT (Depends(get_current_user)) instead.
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from schemas.models import StudentProfile, XPAwardRequest, XPAwardResponse
+from schemas.models import (
+    StudentProfile, XPAwardRequest, XPAwardResponse,
+    VideoProgressRequest, VideoProgressResponse,
+)
 from data.db import get_db
-from data.database import _user_to_dict, apply_xp
+from data.database import _user_to_dict, apply_xp, upsert_video_watch_progress
 from data.models_orm import User
 from auth.security import get_current_user
 
@@ -26,6 +29,25 @@ router = APIRouter(prefix="/api/student", tags=["Student"])
 async def get_profile(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get the authenticated student's profile (badges, XP, streak, live rank)."""
     return StudentProfile(**_user_to_dict(current_user, db))
+
+
+@router.post("/video-progress", response_model=VideoProgressResponse)
+async def save_video_progress(
+    request: VideoProgressRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Persist how far the authenticated student has watched into a video,
+    so the course-centric learning flow (see frontend app/video/page.tsx)
+    can resume a partially-watched video instead of always restarting at
+    0:00. Called frequently but throttled client-side — this is a plain
+    upsert, not an audit/evidence record."""
+    result = upsert_video_watch_progress(
+        user_id=current_user.id,
+        video_id=request.video_id,
+        position_seconds=request.position_seconds,
+        duration_seconds=request.duration_seconds,
+    )
+    return VideoProgressResponse(**result)
 
 
 @router.post("/xp", response_model=XPAwardResponse)

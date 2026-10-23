@@ -498,6 +498,28 @@ class DailyChallengeProgress(Base):
     xp_awarded = Column(Boolean, default=False)  # guards against double XP for the same day
 
 
+class VideoWatchProgress(Base):
+    """Per-student playback position for a video, so the learning flow can
+    resume a partially-watched video instead of always restarting at 0:00.
+
+    Deliberately separate from StudyVideoCompletion (a terminal, ordered
+    research-evidence record) — this is just "where was I" convenience
+    state, upserted frequently (throttled client-side) while a video
+    plays, independent of whether a study session exists for it.
+    """
+    __tablename__ = "video_watch_progress"
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    video_id = Column(String, ForeignKey("local_videos.id"), nullable=False, index=True)
+    position_seconds = Column(Float, default=0)
+    duration_seconds = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "video_id", name="uq_video_watch_progress_user_video"),
+    )
+
+
 class PasswordResetToken(Base):
     """
     FIX (remaining-things request): password reset didn't exist at all.

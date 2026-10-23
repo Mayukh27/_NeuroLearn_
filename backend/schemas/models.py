@@ -45,6 +45,17 @@ class XPAwardRequest(BaseModel):
     reason: str
 
 
+class VideoProgressRequest(BaseModel):
+    video_id: str
+    position_seconds: float
+    duration_seconds: Optional[float] = None
+
+
+class VideoProgressResponse(BaseModel):
+    video_id: str
+    position_seconds: float
+
+
 class XPAwardResponse(BaseModel):
     new_xp: int
     new_level: int

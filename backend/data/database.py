@@ -33,7 +33,7 @@ from data.models_orm import (
     ResearchParticipant, StudySession, QuestionResponse, ResearchCRSDecision,
     ResearchLegacyDecision,
     BehavioralSummary, PrePostResult, GeneratedQuestion, StudyVideoCompletion,
-    VideoTranscriptCache, LocalVideo,
+    VideoTranscriptCache, LocalVideo, VideoWatchProgress,
 )
 from config.video_config import (
     get_nginx_video_url,
@@ -415,6 +415,21 @@ def record_completed_video(
             db.add(existing)
             if not study.video_id:
                 study.video_id = video_id
+
+            # FIX (phase-2 request): total_watch_time was defined on the
+            # User model and returned in /api/student/profile but never
+            # written anywhere, so the dashboard's "Study Time" stat was
+            # always 0 from the backend and had to be faked client-side
+            # (estimatedHours * progress%). Accrue it here, once per
+            # distinct completed video (guarded by the `existing is None`
+            # branch above so re-completing the same video is still a
+            # no-op), using the video's real recorded duration.
+            user = db.get(User, user_id)
+            local_video = db.get(LocalVideo, video_id)
+            if user is not None and local_video is not None and local_video.duration_seconds:
+                user.total_watch_time = (user.total_watch_time or 0) + round(
+                    local_video.duration_seconds / 60
+                )
         elif transcript_text and not (existing.transcript_text or "").strip():
             existing.transcript_text = transcript_text
 
@@ -543,7 +558,9 @@ def save_video_transcript(video_url: str, segments: list[dict]) -> None:
 def _user_to_dict(user: User, db: Session) -> dict:
     """Shape a User row into the same dict shape StudentProfile expects,
     including a live-computed `rank` (position in the real leaderboard —
-    see get_leaderboard) rather than a stored, staleable rank field."""
+    see get_leaderboard) and `total_courses_completed` (real per-student
+    course-completion count — see _count_completed_courses_for_user)
+    rather than stored, staleable fields."""
     rank = _compute_rank(db, user.id)
     return {
         "id": user.id,
@@ -555,12 +572,37 @@ def _user_to_dict(user: User, db: Session) -> dict:
         "xp_to_next_level": xp_to_next_level(user.xp),
         "streak": user.streak,
         "best_streak": user.best_streak,
-        "total_courses_completed": user.total_courses_completed,
+        "total_courses_completed": _count_completed_courses_for_user(db, user.id),
         "total_watch_time": user.total_watch_time,
         "joined_date": user.joined_date.isoformat() if isinstance(user.joined_date, date) else str(user.joined_date),
         "rank": rank,
         "badges": user.badges or [],
     }
+
+
+def _count_completed_courses_for_user(db: Session, user_id: str) -> int:
+    """FIX (phase-2 request): User.total_courses_completed was defined,
+    initialized to 0 at signup, and returned in the profile/leaderboard —
+    but nothing in the backend ever incremented it, so it was permanently
+    0 for every student. Rather than add a fragile stored counter that
+    has to be kept in sync with completions across multiple study
+    sessions (and could double-count or drift), derive it the same way
+    per-course progress is now derived: count courses where this
+    student's real completed-video set covers every video in the course.
+    """
+    completed_ids = _get_completed_video_ids_for_user(db, user_id)
+    if not completed_ids:
+        return 0
+    count = 0
+    for course in db.execute(select(Course)).scalars().all():
+        links = course.video_links or []
+        total = course.total_videos or len(links)
+        if not total:
+            continue
+        course_video_ids = {v.get("local_video_id") for v in links if v.get("local_video_id")}
+        if course_video_ids and course_video_ids.issubset(completed_ids):
+            count += 1
+    return count
 
 
 def _compute_rank(db: Session, student_id: str) -> int:
@@ -602,28 +644,105 @@ def update_student(student_id: str, updates: dict):
 
 # ── Courses ──────────────────────────────────────────────────
 
-def get_all_courses() -> list[dict]:
+def get_all_courses(user_id: Optional[str] = None) -> list[dict]:
     db = _session()
     try:
         rows = db.execute(select(Course)).scalars().all()
-        return [_course_to_dict(c) for c in rows]
+        completed_ids = _get_completed_video_ids_for_user(db, user_id) if user_id else None
+        progress_by_video = _get_watch_progress_for_user(db, user_id) if user_id else None
+        return [
+            _course_to_dict(c, completed_video_ids=completed_ids, progress_by_video=progress_by_video)
+            for c in rows
+        ]
     finally:
         db.close()
 
 
-def get_course(course_id: str) -> Optional[dict]:
+def get_course(course_id: str, user_id: Optional[str] = None) -> Optional[dict]:
     db = _session()
     try:
         c = db.get(Course, course_id)
-        return _course_to_dict(c) if c else None
+        if not c:
+            return None
+        completed_ids = _get_completed_video_ids_for_user(db, user_id) if user_id else None
+        progress_by_video = _get_watch_progress_for_user(db, user_id) if user_id else None
+        return _course_to_dict(c, completed_video_ids=completed_ids, progress_by_video=progress_by_video)
     finally:
         db.close()
 
 
-def _course_to_dict(c: Course) -> dict:
+def _get_completed_video_ids_for_user(db: Session, user_id: str) -> set[str]:
+    """Distinct local_video ids this student has actually completed,
+    across every one of their study sessions (any condition/sequence).
+
+    FIX (phase-2 request): Course.completed_videos/Course.progress are
+    columns on the *global* course row (shared by every student), and
+    nothing in the backend ever wrote to them — so every student saw
+    0%/0 completed on every course regardless of what they'd actually
+    watched. Real per-student completion lives in StudyVideoCompletion
+    (joined through StudySession.user_id); this computes that set so
+    _course_to_dict can derive real progress per request instead.
+    """
+    rows = db.execute(
+        select(StudyVideoCompletion.video_id)
+        .join(StudySession, StudySession.study_session_id == StudyVideoCompletion.study_session_id)
+        .where(StudySession.user_id == user_id)
+        .distinct()
+    ).scalars().all()
+    return set(rows)
+
+
+def upsert_video_watch_progress(
+    user_id: str, video_id: str, position_seconds: float, duration_seconds: Optional[float] = None
+) -> dict:
+    """Persist how far into a video this student has actually watched.
+
+    FIX (phase-4 request): "resume where I left off" needs a real
+    per-student position to resume *to* — there was no such column
+    anywhere before this. Called frequently (throttled client-side, not
+    every timeupdate tick) from the video player, so this is a plain
+    upsert, not an audit trail like StudyVideoCompletion.
+    """
+    db = _session()
+    try:
+        row = db.execute(
+            select(VideoWatchProgress).where(
+                VideoWatchProgress.user_id == user_id,
+                VideoWatchProgress.video_id == video_id,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = VideoWatchProgress(user_id=user_id, video_id=video_id)
+            db.add(row)
+        row.position_seconds = max(0.0, position_seconds)
+        if duration_seconds:
+            row.duration_seconds = duration_seconds
+        db.commit()
+        return {"video_id": video_id, "position_seconds": row.position_seconds}
+    finally:
+        db.close()
+
+
+def _get_watch_progress_for_user(db: Session, user_id: str) -> dict[str, float]:
+    """video_id -> position_seconds for every video this student has any
+    saved playback position for (used to resume the right video/spot)."""
+    rows = db.execute(
+        select(VideoWatchProgress.video_id, VideoWatchProgress.position_seconds).where(
+            VideoWatchProgress.user_id == user_id
+        )
+    ).all()
+    return {video_id: (position_seconds or 0) for video_id, position_seconds in rows}
+
+
+def _course_to_dict(
+    c: Course,
+    completed_video_ids: Optional[set[str]] = None,
+    progress_by_video: Optional[dict[str, float]] = None,
+) -> dict:
     db = _session()
     try:
         video_links = []
+        completed_count = 0
 
         for video in c.video_links or []:
             video_copy = dict(video)
@@ -638,7 +757,43 @@ def _course_to_dict(c: Course) -> dict:
                         local_video.relative_path
                     )
 
+            if completed_video_ids is not None:
+                # FIX (phase-4 request): "completed" used to be a static
+                # False written once when the video was attached to the
+                # course (a global, admin-time value — see
+                # attach_local_video_to_course/attach_youtube_video_to_course)
+                # and never updated per student, which made the "resume at
+                # first incomplete video" logic meaningless. Overwrite with
+                # this student's real completion state.
+                is_completed = local_video_id in completed_video_ids
+                video_copy["completed"] = is_completed
+                if is_completed:
+                    completed_count += 1
+            if progress_by_video is not None and local_video_id:
+                position = progress_by_video.get(local_video_id, 0)
+                duration = video_copy.get("duration") or 0
+                # FIX (phase-4 request): watched_percent was hardcoded to 0
+                # at attach-time (see attach_local_video_to_course) and
+                # never updated — VideoLinkSelector.tsx already renders a
+                # partial-progress bar from it, it just never had real data.
+                video_copy["watched_percent"] = (
+                    min(100.0, round((position / duration) * 100, 1)) if duration else 0
+                )
+
             video_links.append(video_copy)
+
+        total = c.total_videos or len(video_links)
+        if completed_video_ids is not None:
+            # Real per-student values, derived above — NOT the shared
+            # global c.completed_videos/c.progress columns.
+            completed_videos = completed_count
+            progress = round((completed_count / total) * 100, 1) if total else 0
+        else:
+            # No authenticated user in scope (e.g. an internal/admin call
+            # with no student context) — fall back to the raw columns
+            # rather than silently claiming 0/0 progress for a real user.
+            completed_videos = c.completed_videos
+            progress = c.progress
 
         return {
             "id": c.id,
@@ -648,8 +803,8 @@ def _course_to_dict(c: Course) -> dict:
             "category": c.category,
             "difficulty": c.difficulty,
             "total_videos": c.total_videos,
-            "completed_videos": c.completed_videos,
-            "progress": c.progress,
+            "completed_videos": completed_videos,
+            "progress": progress,
             "estimated_hours": c.estimated_hours,
             "tags": c.tags or [],
             "video_links": video_links,
@@ -661,6 +816,106 @@ def _course_to_dict(c: Course) -> dict:
 # these functions (called only from admin-gated endpoints in
 # routers/courses.py — see services/admin_auth.py). There is no hardcoded
 # seed catalog in V2.
+
+def bulk_import_course(
+    *,
+    title: str,
+    description: str = "",
+    icon: str = "📚",
+    category: str = "General",
+    difficulty: str = "Beginner",
+    estimated_hours: float = 0,
+    tags: Optional[list[str]] = None,
+    videos: list[dict],
+) -> dict:
+    """Create one Course plus a LocalVideo row and video_links entry for
+    every item in `videos`, as a SINGLE transaction — either the whole
+    course and all its videos are created, or none of them are.
+
+    FIX (phase-5 request): the previous flow was create-course, then
+    attach-one-video N times (each its own commit) — a failure partway
+    through left a half-populated course with no automatic cleanup. This
+    is the real "bulk import a whole course folder" endpoint the admin
+    UX needs; each item in `videos` is already a validated, on-disk
+    relative_path with its ffprobe'd duration (see routers/courses.py
+    for the upload/probe step — this function only does the DB part).
+
+    Each dict in `videos` must have: relative_path, title, order, and
+    optionally duration_seconds, file_size_bytes.
+    """
+    from config.video_config import get_nginx_video_url  # local import avoids a module-load-order cycle
+
+    if not videos:
+        raise ValueError("bulk_import_course requires at least one video.")
+
+    db = _session()
+    try:
+        course = Course(
+            id=uuid.uuid4().hex,
+            title=title,
+            description=description,
+            icon=icon,
+            category=category,
+            difficulty=difficulty,
+            total_videos=len(videos),
+            completed_videos=0,
+            progress=0,
+            estimated_hours=estimated_hours,
+            tags=tags or [],
+            video_links=[],
+        )
+        db.add(course)
+        db.flush()  # assign course.id-backed FKs without committing yet
+
+        video_links = []
+        for v in videos:
+            local_video = LocalVideo(
+                id=uuid.uuid4().hex,
+                title=v["title"],
+                relative_path=v["relative_path"],
+                course_id=course.id,
+                duration_seconds=v.get("duration_seconds"),
+                file_size_bytes=v.get("file_size_bytes"),
+                order=v["order"],
+            )
+            db.add(local_video)
+            db.flush()
+
+            video_links.append({
+                # FIX (found via live HTTP testing while verifying phase
+                # 2/4/5 end-to-end): this id is the ONLY video identifier
+                # the student-facing schema exposes (schemas.models.
+                # VideoLink has no local_video_id field), and it's the
+                # exact value the frontend sends back for completion
+                # (completeStudyVideo) and resume (saveVideoProgress).
+                # A random id here — as this used to be — means neither
+                # of those could ever match a LocalVideo row on the way
+                # back in; completion/watch-time/resume would silently
+                # no-op forever. Using local_video.id directly makes the
+                # round-trip actually work, and stays unique within this
+                # course's video_links list (one link per local video,
+                # per course).
+                "id": local_video.id,
+                "local_video_id": local_video.id,
+                "title": v["title"],
+                "url": get_nginx_video_url(v["relative_path"]),
+                "duration": int(v.get("duration_seconds") or 0),
+                "thumbnail": "",
+                "order": v["order"],
+                "completed": False,
+                "watched_percent": 0,
+            })
+
+        course.video_links = video_links
+        db.commit()
+        db.refresh(course)
+        return _course_to_dict(course)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 
 def create_course(
     *,
@@ -742,7 +997,9 @@ def attach_local_video_to_course(
 
         link_order = order if order is not None else len(video_links) + 1
         video_links.append({
-            "id": uuid.uuid4().hex,
+            # FIX (same root cause as bulk_import_course — see comment
+            # there, found via live testing): must equal local_video_id.
+            "id": video.id,
             "local_video_id": video.id,
             "title": title or video.title,
             "url": get_nginx_video_url(video.relative_path),
@@ -1756,7 +2013,7 @@ def get_leaderboard(limit: int = 50) -> list[dict]:
                 "xp": u.xp,
                 "level": u.level,
                 "streak": u.streak,
-                "courses_completed": u.total_courses_completed,
+                "courses_completed": _count_completed_courses_for_user(db, u.id),
             }
             for i, u in enumerate(rows)
         ]

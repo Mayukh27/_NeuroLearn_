@@ -145,6 +145,70 @@ export async function adminCreateCourse(input: {
   })
 }
 
+export interface ImportCourseFile {
+  file: File
+  relativePath: string
+}
+
+/** POST /api/courses/import — multipart, so this deliberately does NOT
+ *  go through adminFetch (which forces Content-Type: application/json;
+ *  a multipart request needs the browser to set its own boundary).
+ *  Uses XMLHttpRequest instead of fetch so real upload progress
+ *  (course video folders can be large) is available via onProgress. */
+export function adminImportCourseFolder(
+  meta: {
+    title: string
+    description?: string
+    icon?: string
+    category?: string
+    difficulty?: string
+    estimated_hours?: number
+    tags?: string[]
+  },
+  files: ImportCourseFile[],
+  onProgress?: (fractionComplete: number) => void
+): Promise<AdminCourse> {
+  const form = new FormData()
+  form.set("title", meta.title)
+  form.set("description", meta.description ?? "")
+  form.set("icon", meta.icon ?? "📚")
+  form.set("category", meta.category ?? "General")
+  form.set("difficulty", meta.difficulty ?? "Beginner")
+  form.set("estimated_hours", String(meta.estimated_hours ?? 0))
+  form.set("tags", JSON.stringify(meta.tags ?? []))
+  for (const { file, relativePath } of files) {
+    form.append("files", file, file.name)
+    form.append("relative_paths", relativePath)
+  }
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open("POST", `${API_BASE}/courses/import`)
+    xhr.setRequestHeader("X-Admin-Key", getAdminKey())
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status === 401 || xhr.status === 403) {
+        reject(new AdminAuthError())
+        return
+      }
+      let body: any = null
+      try {
+        body = JSON.parse(xhr.responseText)
+      } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as AdminCourse)
+      } else {
+        reject(new Error(body?.detail || `Import failed (${xhr.status})`))
+      }
+    }
+    xhr.onerror = () => reject(new Error("Network error during course import."))
+    xhr.send(form)
+  })
+}
+
 export async function adminDeleteCourse(courseId: string): Promise<void> {
   await adminFetch<void>(`/courses/${courseId}`, { method: "DELETE" })
 }

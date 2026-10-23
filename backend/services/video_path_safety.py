@@ -14,7 +14,12 @@ FastAPI generally — that's Nginx's job (Phase 3). This module only ever
 touches the filesystem to check existence/stat a file for metadata
 purposes (see routers/videos.py in this phase).
 """
+import shutil
+import subprocess
 from pathlib import Path, PurePosixPath
+from typing import Optional
+
+from loguru import logger
 
 from config.video_config import ALLOWED_VIDEO_EXTENSIONS, get_video_storage_root
 
@@ -75,6 +80,51 @@ def resolve_video_absolute_path(relative_path: str) -> Path:
     """
     safe_relative = validate_relative_video_path(relative_path)
     return get_video_storage_root() / safe_relative
+
+
+_UNSAFE_SEGMENT_CHARS = str.maketrans("", "", "\x00")
+
+
+def sanitize_path_segment(name: str, fallback: str = "untitled") -> str:
+    """Turn one untrusted path segment (a folder or file name from a
+    browser-side `webkitRelativePath`, e.g. via bulk course import) into
+    something safe to use as a single filesystem path component.
+
+    Deliberately stricter than validate_relative_video_path (which
+    checks an already-trusted, server-known relative path): this handles
+    attacker-controlled input from an upload, one segment at a time, so
+    '..' or a path separator embedded in a single segment can't smuggle
+    the file outside the intended course folder.
+    """
+    name = (name or "").strip().translate(_UNSAFE_SEGMENT_CHARS)
+    name = name.replace("/", "_").replace("\\", "_")
+    if name in ("", ".", ".."):
+        return fallback
+    return name[:200]
+
+
+def probe_video_duration_seconds(absolute_path: Path) -> Optional[float]:
+    """Best-effort real video duration via ffprobe, for bulk course
+    import (where, unlike the single-file register endpoint, the admin
+    never plays the file client-side first to read its duration).
+    Returns None if ffprobe isn't installed or the probe fails — callers
+    must treat that as "unknown", not "zero-length".
+    """
+    if shutil.which("ffprobe") is None:
+        logger.warning("ffprobe not found on PATH — imported videos will have no duration until re-probed.")
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(absolute_path),
+            ],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return round(float(result.stdout.strip()), 2)
+    except (subprocess.SubprocessError, ValueError, OSError) as e:
+        logger.warning(f"ffprobe failed for {absolute_path}: {e}")
+        return None
 
 
 def video_file_exists(relative_path: str) -> bool:

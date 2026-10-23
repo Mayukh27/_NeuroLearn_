@@ -1,0 +1,159 @@
+============================================================
+NeuroLearn V2 — Windows 11 startup guide
+============================================================
+Four things run at once, in this order: Postgres -> Backend ->
+Frontend -> Nginx. Each runs in its OWN terminal window and stays
+open (nothing here is a background service unless you set one up
+yourself). Do these once per machine setup, then just the "Every
+time you start working" section afterward.
+
+------------------------------------------------------------
+0. ONE-TIME SETUP
+------------------------------------------------------------
+
+A) Postgres
+   - Install Postgres 16 for Windows if you haven't:
+     https://www.postgresql.org/download/windows/
+   - During install, set a password for the postgres superuser
+     and remember it.
+   - Open "SQL Shell (psql)" from the Start menu, connect as
+     postgres, then create the app's DB + user:
+
+         CREATE USER neurolearn WITH PASSWORD 'neurolearn_dev_pw';
+         CREATE DATABASE neurolearn OWNER neurolearn;
+
+     (These match backend/data/db.py's defaults exactly, so you
+     won't need to set DATABASE_URL/PG_* env vars at all unless
+     you want different credentials.)
+
+B) Backend Python environment
+   Open PowerShell in the backend folder:
+
+         cd D:\GithubRepositories\NeuroLearn_V2\backend
+         python -m venv venv
+         venv\Scripts\activate
+         pip install -r requirements.txt
+
+   This installs everything including the ML stack (torch,
+   mediapipe, faster-whisper) — it's a large install and will
+   take a while the first time.
+
+   Copy .env.example to .env in the backend folder and fill in
+   real values (at minimum, set ADMIN_API_KEY to something only
+   you know — it's what unlocks /admin in the browser).
+
+C) ffmpeg / ffprobe (needed for Phase 5's bulk course import —
+   it's how the server reads each imported video's real length)
+   - Download a Windows build: https://www.gyan.dev/ffmpeg/builds/
+     (the "essentials" build is enough)
+   - Unzip it somewhere permanent, e.g. C:\ffmpeg
+   - Add C:\ffmpeg\bin to your PATH (System Properties -> Environment
+     Variables -> Path -> New)
+   - Open a NEW terminal and confirm: ffprobe -version
+     If that prints a version, you're set. If bulk import ever
+     shows videos with duration 0, this is the first thing to check.
+
+D) Frontend
+         cd D:\GithubRepositories\NeuroLearn_V2\frontend
+         npm install
+
+E) Nginx for Windows
+   - Download: https://nginx.org/en/download.html (the Windows
+     build, e.g. nginx-1.30.0)
+   - Unzip to C:\nginx-1.30.0 (must match the path in
+     nginx\neurolearn_video.conf's "include" line — if you unzip
+     somewhere else, edit that line to match)
+   - Create the logs folder the conf file expects:
+         mkdir D:\GithubRepositories\NeuroLearn_V2\nginx\logs
+   - Create the video storage folder Nginx serves from, matching
+     the conf's /media/ alias:
+         mkdir D:\GithubRepositories\NeuroLearn_V2\videos
+     (Admin course imports write here automatically — you don't
+     place files by hand unless you're using the old single-file
+     "register a video" admin form instead of bulk import.)
+
+------------------------------------------------------------
+1. EVERY TIME YOU START WORKING
+------------------------------------------------------------
+Open 4 separate terminal windows.
+
+--- Terminal 1: Postgres ---
+Usually already running as a Windows service after install
+(check Services app for "postgresql-x64-16"). If it's not
+running, start it there, or:
+         net start postgresql-x64-16
+
+--- Terminal 2: Backend ---
+         cd D:\GithubRepositories\NeuroLearn_V2\backend
+         venv\Scripts\activate
+         alembic upgrade head
+         uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+   Run "alembic upgrade head" every time you pull new backend
+   changes that might include a new migration (like the
+   video_watch_progress table added in Phase 4) — it's safe to
+   run even when there's nothing new to apply.
+
+   Wait for "Backend ready! Docs at http://localhost:8000/docs"
+   before moving on.
+
+--- Terminal 3: Frontend ---
+         cd D:\GithubRepositories\NeuroLearn_V2\frontend
+         npm run dev
+
+   Wait for it to say it's ready on http://localhost:3000.
+
+--- Terminal 4: Nginx ---
+   Nginx runs from wherever you unzipped it, not from the repo:
+         cd C:\nginx-1.30.0
+         nginx.exe -c D:\GithubRepositories\NeuroLearn_V2\nginx\neurolearn_video.conf
+
+   This starts Nginx and returns you to the prompt (it runs in
+   the background as its own process, not attached to this
+   terminal). To stop it later:
+         nginx.exe -s stop
+   To reload it after editing the .conf file without a full
+   restart:
+         nginx.exe -s reload
+
+------------------------------------------------------------
+2. WHERE TO ACTUALLY GO IN THE BROWSER
+------------------------------------------------------------
+   http://localhost:18080        <- the real entry point (via Nginx,
+                                     matches how a real LAN client
+                                     would reach it)
+   http://localhost:18080/admin  <- content manager (needs the
+                                     ADMIN_API_KEY you set in .env)
+   http://localhost:3000         <- frontend directly, bypassing
+                                     Nginx (fine for quick frontend-
+                                     only iteration, but video
+                                     playback needs Nginx's /media/
+                                     route, so use :18080 for
+                                     anything video-related)
+   http://localhost:8000/docs    <- FastAPI's interactive API docs
+
+------------------------------------------------------------
+3. QUICK SANITY CHECKS
+------------------------------------------------------------
+   - Backend terminal should end its startup log with:
+       "Backend ready! Docs at http://localhost:8000/docs"
+   - http://localhost:8000/docs should load and list the routes
+     (GET /api/courses, POST /api/courses/import, etc.)
+   - http://localhost:18080 should redirect you to /login if
+     you're not signed in yet.
+   - Sign up a test account, then visit /admin, unlock it with
+     your ADMIN_API_KEY, and try "Import Course Folder" with a
+     small test folder of real .mp4 files to confirm ffprobe is
+     wired up correctly (durations should show as real numbers,
+     not 0, in the Video Library list after import).
+
+------------------------------------------------------------
+4. SHUTTING EVERYTHING DOWN
+------------------------------------------------------------
+   Terminal 4 (Nginx):    nginx.exe -s stop   (from C:\nginx-1.30.0)
+   Terminal 3 (Frontend): Ctrl+C
+   Terminal 2 (Backend):  Ctrl+C
+   Terminal 1 (Postgres): leave running as a Windows service, or
+                           net stop postgresql-x64-16 if you want
+                           it fully off between sessions.
+============================================================

@@ -58,7 +58,11 @@ export default function DashboardPage() {
   }
 
   const totalCompleted = courses.filter((c) => c.progress === 100).length
-  const totalWatchHours = Math.round(courses.reduce((sum, c) => sum + c.estimatedHours * (c.progress / 100), 0))
+  // FIX (phase-2 request): was estimatedHours * progress% (an estimate,
+  // not a measurement). student.totalWatchTime is now a real backend
+  // value, persisted minute-by-minute as videos are actually completed
+  // (see backend data/database.py: record_completed_video).
+  const totalWatchHours = Math.round((student?.totalWatchTime || 0) / 60)
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-8">

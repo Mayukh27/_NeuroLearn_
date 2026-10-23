@@ -23,11 +23,34 @@ import {
   completeStudyVideo,
   startStudySession,
   getStudyConsent,
+  saveVideoProgress,
   type Course,
   type VideoLink,
   type StudySession,
 } from "@/lib/api"
 import { getOrCreateWebcamSessionId } from "@/lib/consent"
+
+/**
+ * FIX (phase-4 request): resume priority — a video actually in progress
+ * beats one never started, which beats falling back to the first video
+ * for review once everything is done. `watchedPercent`/`completed` are
+ * now real per-student values from the backend (see
+ * backend/data/database.py: _course_to_dict), not the old static
+ * attach-time placeholders.
+ */
+function pickResumeVideo(vids: VideoLink[]): VideoLink | undefined {
+  const partial = vids.find((v) => !v.completed && v.watchedPercent > 0 && v.watchedPercent < 100)
+  if (partial) return partial
+  const incomplete = vids.find((v) => !v.completed)
+  if (incomplete) return incomplete
+  return vids[0] // everything complete — first video, for review
+}
+
+/** Seconds into `video` to resume at, derived from its real watchedPercent. */
+function resumeSecondsFor(video: VideoLink | null): number {
+  if (!video || !video.duration || !video.watchedPercent) return 0
+  return (video.watchedPercent / 100) * video.duration
+}
 
 export default function VideoPage() {
   return (
@@ -79,6 +102,11 @@ function VideoContent() {
     studySessionIdRef.current = studySession?.studySessionId ?? null
   }, [studySession?.studySessionId])
 
+  const selectedVideoIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedVideoIdRef.current = selectedVideo?.id ?? null
+  }, [selectedVideo?.id])
+
   const sessionCreatedForCourseRef = useRef<string | null>(null)
 
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
@@ -104,7 +132,7 @@ function VideoContent() {
             const vids = c.videoLinks || []
             const target = videoIdParam
               ? vids.find((v) => v.id === videoIdParam)
-              : vids.find((v) => !v.completed) || vids[0]
+              : pickResumeVideo(vids)
             if (target) setSelectedVideo(target)
           }
         } else {
@@ -112,7 +140,7 @@ function VideoContent() {
           if (courses.length > 0) {
             setCourse(courses[0])
             const vids = courses[0].videoLinks || []
-            const first = vids.find((v) => !v.completed) || vids[0]
+            const first = pickResumeVideo(vids)
             if (first) setSelectedVideo(first)
           }
         }
@@ -178,9 +206,25 @@ function VideoContent() {
     }
   }, [course?.id, selectedVideo?.id, studySessionParam, studyConsentGranted])
 
+  const lastProgressSaveRef = useRef<{ videoId: string; wallClockMs: number } | null>(null)
+
   const handleTimeUpdate = useCallback((ct: number, dur: number) => {
     setCurrentTime(ct)
     setVideoDuration(dur)
+
+    // FIX (phase-4 request): persist real watch position so the next
+    // visit can resume here — throttled to ~every 10s (not every
+    // timeupdate tick, which fires several times a second) and
+    // best-effort: a failed save shouldn't interrupt playback.
+    const videoId = selectedVideoIdRef.current
+    if (!videoId || !dur) return
+    const now = Date.now()
+    const last = lastProgressSaveRef.current
+    if (last && last.videoId === videoId && now - last.wallClockMs < 10000) return
+    lastProgressSaveRef.current = { videoId, wallClockMs: now }
+    void saveVideoProgress(videoId, ct, dur).catch((err) =>
+      console.error("Failed to save video progress:", err)
+    )
   }, [])
 
   const handlePlayStateChange = useCallback((playing: boolean) => {
@@ -329,7 +373,7 @@ function VideoContent() {
 
         <div className="lg:col-span-6 space-y-5 order-1 lg:order-2">
           {effectiveUrl ? (
-            <VideoPlayer videoUrl={effectiveUrl} title={effectiveTitle} onTimeUpdate={handleTimeUpdate} onPlayStateChange={handlePlayStateChange} onVideoEnd={handleVideoEnd} />
+            <VideoPlayer videoUrl={effectiveUrl} title={effectiveTitle} startAt={resumeSecondsFor(selectedVideo)} onTimeUpdate={handleTimeUpdate} onPlayStateChange={handlePlayStateChange} onVideoEnd={handleVideoEnd} />
           ) : (
             <div className="rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] aspect-video flex flex-col items-center justify-center gap-3">
               <BookOpen size={32} className="text-[var(--text-muted)]" />

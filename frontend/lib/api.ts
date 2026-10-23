@@ -1,19 +1,23 @@
 // ============================================================
-// API SERVICE LAYER — FastAPI Backend + Dummy Fallback
+// API SERVICE LAYER — FastAPI Backend (+ dev-only dummy fallback)
 //
 // USAGE:
 //   1. Set NEXT_PUBLIC_API_URL=http://localhost:8000/api in .env.local
 //   2. Start FastAPI backend: cd backend && python main.py
-//   3. Every function tries the backend first
-//   4. On failure → falls back to local dummy data seamlessly
-//
-// To switch to BACKEND-ONLY mode (no fallback):
-//   Set NEXT_PUBLIC_API_STRICT=true
+//   3. Course catalog (fetchCourses/fetchCourseById/fetchVideoById) is
+//      ALWAYS backend-only — Postgres -> FastAPI -> Frontend, no dummy
+//      fallback and no localStorage merge, in every mode. Old/demo
+//      courses must never appear, per the research app requirements.
+//   4. Everything else (profile, XP, leaderboard, daily challenges,
+//      notifications, transcript) tries the backend first, and only
+//      falls back to local dummy fixtures on failure — UNLESS
+//      NEXT_PUBLIC_API_STRICT=true, in which case those also surface a
+//      real error instead of silently showing dummy data. Set this for
+//      the production/research deployment.
 // ============================================================
 
 import {
   DUMMY_STUDENT,
-  DUMMY_COURSES,
   DUMMY_LEADERBOARD,
   DUMMY_DAILY_CHALLENGES,
   DUMMY_NOTIFICATIONS,
@@ -290,6 +294,32 @@ export async function awardXP(
       const leveledUp = s.xp >= s.xpToNextLevel
       if (leveledUp) { s.level++; s.xp -= s.xpToNextLevel; s.xpToNextLevel = Math.floor(s.xpToNextLevel * 1.2) }
       return { newXP: s.xp, newLevel: s.level, leveledUp, xpToNextLevel: s.xpToNextLevel }
+    }
+  )
+}
+
+// ============================================================
+// VIDEO PROGRESS (resume support)
+// ============================================================
+
+/** POST /api/student/video-progress — no dummy fallback; this is
+ *  per-student resume state, not something safe to fake. A failure here
+ *  should be silent/best-effort to the caller (see app/video/page.tsx),
+ *  never block playback. */
+export async function saveVideoProgress(
+  videoId: string,
+  positionSeconds: number,
+  durationSeconds?: number
+): Promise<{ videoId: string; positionSeconds: number }> {
+  return apiFetch(
+    "/student/video-progress",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        video_id: videoId,
+        position_seconds: positionSeconds,
+        duration_seconds: durationSeconds,
+      }),
     }
   )
 }

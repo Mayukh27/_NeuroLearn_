@@ -23,84 +23,6 @@ except ImportError:
 
 class TranscriptionService:
 
-    DUMMY_SEGMENTS = [
-        {
-            "text": "Welcome to this lesson on React fundamentals.",
-            "start": 0.0,
-            "end": 3.0,
-        },
-        {
-            "text": "Today we'll explore how React uses a virtual DOM for efficient rendering.",
-            "start": 4.0,
-            "end": 8.0,
-        },
-        {
-            "text": "Components are the building blocks of any React application.",
-            "start": 9.0,
-            "end": 12.0,
-        },
-        {
-            "text": "You can think of components as reusable, self-contained pieces of UI.",
-            "start": 13.0,
-            "end": 17.0,
-        },
-        {
-            "text": "There are two types: functional components and class components.",
-            "start": 18.0,
-            "end": 22.0,
-        },
-        {
-            "text": "Modern React strongly favors functional components with hooks.",
-            "start": 23.0,
-            "end": 27.0,
-        },
-        {
-            "text": "The useState hook lets you add state to functional components.",
-            "start": 28.0,
-            "end": 32.0,
-        },
-        {
-            "text": "useEffect handles side effects like data fetching and subscriptions.",
-            "start": 33.0,
-            "end": 37.0,
-        },
-        {
-            "text": "Props allow you to pass data from parent to child components.",
-            "start": 38.0,
-            "end": 42.0,
-        },
-        {
-            "text": "The key prop helps React efficiently update lists by tracking identity.",
-            "start": 43.0,
-            "end": 47.0,
-        },
-        {
-            "text": "Conditional rendering lets you show or hide UI based on state.",
-            "start": 48.0,
-            "end": 52.0,
-        },
-        {
-            "text": "Event handlers in React use camelCase naming convention.",
-            "start": 53.0,
-            "end": 57.0,
-        },
-        {
-            "text": "Forms in React can be controlled or uncontrolled components.",
-            "start": 58.0,
-            "end": 62.0,
-        },
-        {
-            "text": "Let's now look at a practical example of building a component.",
-            "start": 63.0,
-            "end": 67.0,
-        },
-        {
-            "text": "This component will manage its own state and handle user input.",
-            "start": 68.0,
-            "end": 72.0,
-        },
-    ]
-
     def __init__(self, model_size: str = "base"):
         self.model = None
         self.model_size = model_size
@@ -544,25 +466,28 @@ class TranscriptionService:
         return True, None
 
     def get_segment_at_time(
-        self,
-        current_time: float,
-        video_url: Optional[str] = None,
-    ) -> Optional[dict]:
-        """
-        Return the real Whisper transcript segment active at
-        the requested video timestamp.
-        """
+    self,
+    current_time: float,
+    video_url: Optional[str] = None,
+) -> Optional[dict]:
+       """
+       Return the real Whisper transcript segment active at
+       the requested video timestamp.
 
-        if video_url:
-            segments = self.transcribe_video_url(video_url)
-        else:
-            segments = self.DUMMY_SEGMENTS
+       No video URL means there is no transcript source.
+       Never return dummy/fabricated transcript data.
+      """
 
-        for seg in segments:
-            if seg["start_time"] <= current_time < seg["end_time"]:
-                return seg
+       if not video_url:
+         return None
 
-        return None
+       segments = self.transcribe_video_url(video_url)
+
+       for seg in segments:
+         if seg["start_time"] <= current_time < seg["end_time"]:
+            return seg
+
+       return None
 
     # ============================================================
     # FULL TRANSCRIPT
@@ -576,13 +501,13 @@ class TranscriptionService:
         """
         Return the complete transcript.
 
-        If a URL is provided, use the real Whisper transcript.
+        No video URL means there is no transcript source.
+        Never return dummy/fabricated transcript data.
         """
 
         if video_url:
-            return self.transcribe_video_url(video_url)
-
-        return self._get_dummy_segments()
+            return []
+        return self.transcribe_video_url(video_url)
 
     # ============================================================
     # HELPERS
@@ -627,36 +552,6 @@ class TranscriptionService:
             )
 
         return result
-
-    def _get_dummy_segments(self) -> list[dict]:
-        """
-        Fallback only when real transcription is unavailable.
-        """
-
-        segments = []
-
-        for i, seg in enumerate(self.DUMMY_SEGMENTS):
-
-            segments.append(
-                {
-                    "id": f"dummy_{i + 1:04d}",
-                    "text": seg["text"],
-                    "timestamp": self._format_timestamp(seg["start"]),
-                    "start_time": seg["start"],
-                    "end_time": seg["end"],
-                    "confidence": 0.0,
-                    "model_response": {
-                        "language": "en",
-                        "words": self._generate_word_timestamps(
-                            seg["text"],
-                            seg["start"],
-                            seg["end"],
-                        ),
-                    },
-                }
-            )
-
-        return segments
 
 
 # ================================================================

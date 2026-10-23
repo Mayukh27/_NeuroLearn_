@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   Settings,
@@ -13,6 +13,9 @@ import {
   KeyRound,
   AlertCircle,
   CheckCircle2,
+  FolderUp,
+  UploadCloud,
+  X,
 } from "lucide-react"
 
 import {
@@ -23,6 +26,8 @@ import {
   adminListCourses,
   adminCreateCourse,
   adminDeleteCourse,
+  adminImportCourseFolder,
+  type ImportCourseFile,
   adminListVideos,
   adminRegisterVideo,
   adminDeleteVideo,
@@ -32,6 +37,75 @@ import {
   type AdminCourse,
   type AdminLocalVideo,
 } from "@/lib/adminApi"
+
+const ALLOWED_IMPORT_EXTENSIONS = [".mp4", ".webm"]
+
+function isSupportedVideoFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  return ALLOWED_IMPORT_EXTENSIONS.some((ext) => lower.endsWith(ext))
+}
+
+/** Reads every File in a dropped/selected folder, via either the
+ *  `<input webkitdirectory>` FileList (has `.webkitRelativePath` on
+ *  each File already) or a DataTransfer from drag/drop (needs walking
+ *  each DataTransferItem's FileSystemEntry tree to get the same info).
+ *  Non-video files (thumbs.db, .DS_Store, subtitle files, etc.) are
+ *  filtered out here so the preview only ever shows what will actually
+ *  be imported. */
+async function readDroppedFolder(dataTransfer: DataTransfer): Promise<ImportCourseFile[]> {
+  const out: ImportCourseFile[] = []
+
+  async function walk(entry: any, prefix: string): Promise<void> {
+    if (entry.isFile) {
+      await new Promise<void>((resolve) => {
+        entry.file((file: File) => {
+          if (isSupportedVideoFile(file.name)) {
+            out.push({ file, relativePath: prefix + file.name })
+          }
+          resolve()
+        }, () => resolve())
+      })
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader()
+      const entries: any[] = await new Promise((resolve) => {
+        const acc: any[] = []
+        const readBatch = () => {
+          reader.readEntries((batch: any[]) => {
+            if (batch.length === 0) {
+              resolve(acc)
+            } else {
+              acc.push(...batch)
+              readBatch()
+            }
+          }, () => resolve(acc))
+        }
+        readBatch()
+      })
+      for (const child of entries) {
+        await walk(child, prefix + entry.name + "/")
+      }
+    }
+  }
+
+  const items = Array.from(dataTransfer.items)
+  const entries = items.map((item) => item.webkitGetAsEntry?.()).filter(Boolean)
+  for (const entry of entries) {
+    await walk(entry, "")
+  }
+  return out
+}
+
+function filesFromInput(fileList: FileList): ImportCourseFile[] {
+  return Array.from(fileList)
+    .filter((f) => isSupportedVideoFile(f.name))
+    .map((f) => ({
+      file: f,
+      // webkitRelativePath is "FolderName/Module 1/video.mp4" — strip the
+      // top-level folder name itself, since that's the course folder, not
+      // part of the module/file structure inside it.
+      relativePath: (f as any).webkitRelativePath?.split("/").slice(1).join("/") || f.name,
+    }))
+}
 
 /**
  * /admin — Content Manager (V2, Phase 4)
@@ -58,6 +132,72 @@ export default function AdminPage() {
   const [attachSource, setAttachSource] = useState<Record<string, "local" | "youtube">>({})
   const [ytTitle, setYtTitle] = useState<Record<string, string>>({})
   const [ytUrl, setYtUrl] = useState<Record<string, string>>({})
+
+  // ── Bulk course folder import ──
+  const [importFiles, setImportFiles] = useState<ImportCourseFile[]>([])
+  const [importTitle, setImportTitle] = useState("")
+  const [importCategory, setImportCategory] = useState("")
+  const [importDragOver, setImportDragOver] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importProgress, setImportProgress] = useState(0)
+  const folderInputRef = useRef<HTMLInputElement>(null)
+
+  const applyPickedFiles = (files: ImportCourseFile[]) => {
+    if (files.length === 0) {
+      setError("The selected folder does not contain any supported video files (.mp4, .webm).")
+      return
+    }
+    setImportFiles(files)
+    if (!importTitle.trim()) {
+      // Detect the course folder name from the first file's own
+      // (pre-strip) path — prefilled, but the admin can still edit it
+      // before confirming the import (spec: "prefill... but allow editing").
+      const first = files[0]
+      const guess = (first.file as any).webkitRelativePath?.split("/")[0]
+      if (guess) setImportTitle(guess)
+    }
+  }
+
+  const handleFolderInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) applyPickedFiles(filesFromInput(e.target.files))
+    e.target.value = "" // allow re-selecting the same folder later
+  }
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault()
+    setImportDragOver(false)
+    if (!e.dataTransfer.items?.length) return
+    const files = await readDroppedFolder(e.dataTransfer)
+    applyPickedFiles(files)
+  }
+
+  const cancelImport = () => {
+    setImportFiles([])
+    setImportTitle("")
+    setImportCategory("")
+    setImportProgress(0)
+  }
+
+  const handleImportCourse = async () => {
+    if (!importTitle.trim() || importFiles.length === 0) return
+    setImporting(true)
+    setImportProgress(0)
+    setError(null)
+    try {
+      await adminImportCourseFolder(
+        { title: importTitle.trim(), category: importCategory.trim() || "General" },
+        importFiles,
+        (fraction) => setImportProgress(fraction)
+      )
+      flash(`Imported "${importTitle.trim()}" — ${importFiles.length} video${importFiles.length === 1 ? "" : "s"}`)
+      cancelImport()
+      await refresh()
+    } catch (e) {
+      handleAuthError(e)
+    } finally {
+      setImporting(false)
+    }
+  }
 
   const flash = (msg: string) => {
     setNotice(msg)
@@ -348,6 +488,111 @@ export default function AdminPage() {
             <p className="text-xs text-[var(--text-muted)] italic">No videos registered yet.</p>
           )}
         </div>
+      </section>
+
+      {/* Import Course Folder */}
+      <section className="rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <FolderUp size={16} className="text-violet-400" />
+          <h2 className="text-sm font-bold text-[var(--text-primary)]">Import Course Folder</h2>
+        </div>
+        <p className="text-xs text-[var(--text-muted)]">
+          Drop or browse an entire course folder — every video file inside is uploaded and
+          registered, and one new course is created with them all attached, in a single step.
+          Individual videos can still be added or removed afterward from the Courses list below.
+        </p>
+
+        {importFiles.length === 0 ? (
+          <div
+            onDragOver={(e) => { e.preventDefault(); setImportDragOver(true) }}
+            onDragLeave={() => setImportDragOver(false)}
+            onDrop={handleDrop}
+            className={`rounded-xl border-2 border-dashed p-8 flex flex-col items-center gap-3 text-center transition-colors ${
+              importDragOver
+                ? "border-violet-500/60 bg-violet-500/5"
+                : "border-[var(--border-subtle)]"
+            }`}
+          >
+            <UploadCloud size={28} className="text-[var(--text-muted)]" />
+            <p className="text-sm text-[var(--text-secondary)]">Drop course folder here</p>
+            <p className="text-xs text-[var(--text-muted)]">or</p>
+            <button
+              onClick={() => folderInputRef.current?.click()}
+              className="px-3 py-2 text-sm font-semibold rounded-lg bg-violet-500/20 border border-violet-500/30 text-violet-300 flex items-center gap-1.5"
+            >
+              <FolderUp size={14} /> Browse Folder
+            </button>
+            {/* webkitdirectory: the standard (if non-standard-named) way to
+                let an <input type="file"> pick a whole folder — the
+                fallback path required whenever native drag/drop of a
+                folder isn't supported by the browser. */}
+            <input
+              ref={folderInputRef}
+              type="file"
+              // @ts-ignore — non-standard but universally supported attribute
+              webkitdirectory=""
+              directory=""
+              multiple
+              className="hidden"
+              onChange={handleFolderInputChange}
+            />
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={importTitle}
+                onChange={(e) => setImportTitle(e.target.value)}
+                placeholder="Course title"
+                className="flex-1 min-w-[160px] px-3 py-2 text-sm rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-violet-500/50"
+              />
+              <input
+                value={importCategory}
+                onChange={(e) => setImportCategory(e.target.value)}
+                placeholder="Category (optional)"
+                className="flex-1 min-w-[160px] px-3 py-2 text-sm rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-violet-500/50"
+              />
+            </div>
+
+            <div className="rounded-xl bg-[var(--bg-elevated)] p-3 max-h-56 overflow-y-auto space-y-1">
+              <p className="text-xs font-semibold text-[var(--text-secondary)] mb-2">
+                {importFiles.length} video{importFiles.length === 1 ? "" : "s"} detected
+              </p>
+              {importFiles.map((f, i) => (
+                <div key={i} className="text-xs text-[var(--text-muted)] font-mono truncate">
+                  {f.relativePath}
+                </div>
+              ))}
+            </div>
+
+            {importing && (
+              <div className="h-1.5 rounded-full bg-[var(--bg-elevated)] overflow-hidden">
+                <div
+                  className="h-full bg-violet-500 transition-all"
+                  style={{ width: `${Math.round(importProgress * 100)}%` }}
+                />
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                onClick={cancelImport}
+                disabled={importing}
+                className="px-3 py-2 text-sm font-semibold rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)] disabled:opacity-40 flex items-center gap-1.5"
+              >
+                <X size={14} /> Cancel
+              </button>
+              <button
+                onClick={handleImportCourse}
+                disabled={importing || !importTitle.trim()}
+                className="px-3 py-2 text-sm font-semibold rounded-lg bg-violet-500/20 border border-violet-500/30 text-violet-300 disabled:opacity-40 flex items-center gap-1.5"
+              >
+                <FolderUp size={14} />
+                {importing ? `Importing… ${Math.round(importProgress * 100)}%` : "Import Course"}
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Courses */}
