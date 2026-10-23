@@ -11,6 +11,10 @@ from loguru import logger
 from config.video_config import nginx_url_to_relative_path
 from services.video_path_safety import UnsafeVideoPathError, resolve_video_absolute_path
 
+
+class TranscriptionError(RuntimeError):
+    """The source could not be transcribed into genuine, non-empty text."""
+
 try:
     from faster_whisper import WhisperModel
 
@@ -145,8 +149,8 @@ class TranscriptionService:
         -> actual yt-dlp/FFmpeg/Whisper transcription. A successful real
         transcript is written to both the in-memory cache and the
         database (data/database.py's video_transcript_cache table) so it
-        survives a backend restart; a dummy/failed transcript is never
-        persisted to the database (see the except blocks below).
+        survives a backend restart; failed or empty transcripts are never
+        cached.
 
         FIX: this is a long-running, blocking call, so callers must run it
         via run_in_threadpool (see routers/transcription.py) rather than
@@ -181,8 +185,8 @@ class TranscriptionService:
                 return db_segments
 
             if not WHISPER_AVAILABLE or self.model is None:
-                logger.warning("Whisper unavailable — returning dummy transcript")
-                return self._get_dummy_segments()
+                logger.error("Whisper unavailable; refusing to fabricate transcript text")
+                raise TranscriptionError("Transcription service is unavailable")
 
             audio_path = None
 
@@ -312,8 +316,9 @@ class TranscriptionService:
                             }
                         )
 
+                    segments = [segment for segment in segments if segment["text"].strip()]
                     if not segments:
-                        raise RuntimeError("Faster-Whisper returned no transcript segments")
+                        raise TranscriptionError("Transcription produced no usable speech")
 
                     self._video_transcripts[video_url] = segments
 
@@ -323,20 +328,21 @@ class TranscriptionService:
 
                     # Persist the successful real transcript so it survives
                     # a backend restart. This only runs after `segments` is
-                    # built successfully above — a dummy/failed transcript
-                    # (returned from the except blocks below) never reaches
-                    # this line, so it can never poison the database cache.
+                    # built successfully above — failed transcripts never
+                    # reach this line, so they cannot poison the database cache.
                     self._save_to_database_cache(video_url, segments)
 
                     return segments
 
             except subprocess.CalledProcessError as e:
                 logger.error(f"Media processing failed: {e.stderr}")
-                return self._get_dummy_segments()
+                raise TranscriptionError("Unable to extract audio from video") from e
 
             except Exception as e:
                 logger.error(f"Video transcription failed: {e}")
-                return self._get_dummy_segments()
+                if isinstance(e, TranscriptionError):
+                    raise
+                raise TranscriptionError("Video transcription failed") from e
 
     # ============================================================
     # AUDIO CHUNK TRANSCRIPTION
@@ -351,7 +357,8 @@ class TranscriptionService:
         """
 
         if not WHISPER_AVAILABLE or self.model is None:
-            return self._get_dummy_segments()
+            logger.error("Whisper unavailable; refusing to fabricate audio transcript text")
+            raise TranscriptionError("Transcription service is unavailable")
 
         temp_path = None
 
@@ -420,11 +427,16 @@ class TranscriptionService:
                     }
                 )
 
+            segments = [segment for segment in segments if segment["text"].strip()]
+            if not segments:
+                raise TranscriptionError("Transcription produced no usable speech")
             return segments
 
         except Exception as e:
             logger.error(f"Audio chunk transcription failed: {e}")
-            return self._get_dummy_segments()
+            if isinstance(e, TranscriptionError):
+                raise
+            raise TranscriptionError("Audio chunk transcription failed") from e
 
         finally:
             if temp_path and os.path.exists(temp_path):
@@ -505,8 +517,8 @@ class TranscriptionService:
         Never return dummy/fabricated transcript data.
         """
 
-        if video_url:
-            return []
+        if not video_url:
+            raise TranscriptionError("A video URL is required")
         return self.transcribe_video_url(video_url)
 
     # ============================================================

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 
 from config.crs_config import CRS_CONFIG, IntegrityConfig
 
@@ -106,8 +107,13 @@ def compute_response_integrity(
     Returns:
         IntegrityResult with integrity_score in [0,1].
     """
-    time_limit = max(time_limit, 1e-6)
-    time_ratio = max(0.0, time_spent / time_limit)
+    if not math.isfinite(time_spent) or time_spent < 0:
+        raise ValueError("time_spent must be finite and non-negative")
+    if not math.isfinite(time_limit) or time_limit <= 0:
+        raise ValueError("time_limit must be finite and positive")
+    time_ratio = time_spent / time_limit
+    if not math.isfinite(time_ratio):
+        raise ValueError("time_spent / time_limit must be finite")
 
     score, category = _triangular_score(time_ratio, config)
 

@@ -21,6 +21,8 @@ human-readable explanation — exactly the three things Phase 2 specifies
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import math
+from numbers import Real
 from typing import Optional, Sequence
 
 from config.crs_config import CRS_CONFIG, CRSConfig
@@ -65,6 +67,13 @@ def _difficulty_from_crs(crs: float, config: CRSConfig) -> str:
     return "easy"
 
 
+def _validate_scale(name: str, value: Real, low: float, high: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number in [{low}, {high}]")
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be in [{low}, {high}], got {value}")
+
+
 def compute_crs(
     *,
     recent_scores_pct: Optional[Sequence[float]] = None,
@@ -103,13 +112,29 @@ def compute_crs(
         CRSResult — crs in [0,1], difficulty tier, component breakdown,
         weights actually used, and a human-readable explanation string.
     """
+    config.validate()
+    if recent_scores_pct is not None:
+        for index, score in enumerate(recent_scores_pct):
+            _validate_scale(f"recent_scores_pct[{index}]", score, 0.0, 100.0)
+    if attention_score_pct is not None:
+        _validate_scale("attention_score_pct", attention_score_pct, 0.0, 100.0)
+    if was_correct is not None and not isinstance(was_correct, bool):
+        raise ValueError("was_correct must be a boolean when provided")
+    if transcript_text is not None and not isinstance(transcript_text, str):
+        raise ValueError("transcript_text must be a string when provided")
+    if (time_spent is None) != (time_limit is None):
+        raise ValueError("time_spent and time_limit must both be provided or both be missing")
+    if time_spent is not None:
+        _validate_scale("time_spent", time_spent, 0.0, float("inf"))
+        _validate_scale("time_limit", time_limit, math.nextafter(0.0, 1.0), float("inf"))
+
     perf: PerformanceResult = compute_performance(recent_scores_pct, config.performance)
 
     if attention_score_pct is None:
         attention_value = 0.5
         attention_explanation = "No behavioral-cue data provided — neutral default (0.50)."
     else:
-        attention_value = max(0.0, min(1.0, attention_score_pct / 100.0))
+        attention_value = attention_score_pct / 100.0
         attention_explanation = f"Session behavioral-cue score = {attention_score_pct:.0f}%."
 
     if time_spent is None or time_limit is None:
@@ -149,8 +174,6 @@ def compute_crs(
         + w.delta * trend_value
         + w.epsilon * complexity_value
     )
-    crs = max(0.0, min(1.0, crs))
-
     difficulty = _difficulty_from_crs(crs, config)
 
     components = CRSComponents(

@@ -103,7 +103,7 @@ def _run_full_pipeline_for_video(
 ) -> dict:
     """
     For a single video:
-      1. Transcribe via Whisper (or dummy)
+      1. Transcribe via Whisper
       2. Generate assessment from transcript via FLAN-T5
     Returns assessment session dict.
     """
@@ -120,11 +120,16 @@ def _run_full_pipeline_for_video(
             seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")
             for seg in segments
         )
-        update_video_transcription_status(course_id, video_id, available=True)
         logger.info(f"[FullPipeline] Transcription done for {video_id} ({len(transcript_text)} chars)")
     except Exception as ex:
-        logger.warning(f"[FullPipeline] Transcription failed for {video_id}: {ex}")
-        transcript_text = f"Introduction to {title}. This video covers fundamental concepts and practical applications."
+        update_video_transcription_status(course_id, video_id, available=False)
+        logger.exception(f"[FullPipeline] Transcription failed for {video_id}; assessment generation skipped: {ex}")
+        raise RuntimeError(f"Transcription failed for video {video_id}; questions were not generated") from ex
+    if not transcript_text.strip():
+        update_video_transcription_status(course_id, video_id, available=False)
+        logger.error(f"[FullPipeline] Empty transcript for {video_id}; assessment generation skipped")
+        raise RuntimeError(f"Transcription returned no usable text for video {video_id}")
+    update_video_transcription_status(course_id, video_id, available=True)
 
     # Step 2: Adaptive difficulty
     difficulty_result = adaptive_engine.get_initial_difficulty(

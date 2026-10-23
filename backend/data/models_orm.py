@@ -321,6 +321,13 @@ class LocalVideo(Base):
 
 
 class QuestionResponse(Base):
+    """One protocol question's submitted answer or explicit timeout gap.
+
+    ``status="unanswered"`` is written during timeout finalization for a
+    question with no submitted answer. Its answer, correctness, submission
+    time, response time, and score remain NULL. This identifies absence of a
+    submission; it does not establish whether the question was displayed.
+    """
     __tablename__ = "question_responses"
     id = Column(String, primary_key=True, default=_uuid)
     study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, index=True)

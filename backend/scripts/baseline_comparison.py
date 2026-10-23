@@ -1,9 +1,10 @@
 """
-baseline_comparison.py — regenerates the CRS-driven vs. accuracy-only
-Baseline Comparison table (§5.2 of the manuscript revision package)
-directly from the shipped ml/adaptive_engine.py. Compares the preserved
-legacy rule cascade (_determine_difficulty_legacy) against the new
-CRS-driven path (determine_difficulty) on identical inputs.
+baseline_comparison.py — compares the CRS-driven policy with the
+preserved LEGACY rule-cascade baseline on identical synthetic inputs.
+
+The LEGACY cascade uses performance, attention, timing, and trend rules; it
+is not an accuracy-only baseline. Policy disagreement in these scenarios is
+not evidence of superior learner outcomes.
 
 Run from backend/ (note: requires backend/ on PYTHONPATH):
     PYTHONPATH=. python3 scripts/baseline_comparison.py
@@ -35,7 +36,7 @@ SCENARIOS = [
 
 
 def main():
-    header = f'{"Scenario":45s} {"Legacy":>10s} {"CRS":>10s} {"Diverges?":>10s}'
+    header = f'{"Scenario":45s} {"Legacy cascade":>15s} {"CRS":>10s} {"Diverges?":>10s}'
     print(header)
     print("-" * len(header))
     for i, (name, kw) in enumerate(SCENARIOS):

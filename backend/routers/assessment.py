@@ -50,6 +50,7 @@ from data.database import (
     save_assessment_session,
     save_crs_record,
     save_generated_questions,
+    save_question_responses,
     save_research_crs_decision,
     save_research_legacy_decision,
     save_single_question_response,
@@ -451,9 +452,24 @@ def _finalize_assessment(
     # time, exactly as before.
     if not allow_partial and (len(questions) != TOTAL_QUESTIONS or len(answers) != TOTAL_QUESTIONS):
         raise RuntimeError("Cannot complete an assessment before all ten protocol questions are answered")
-    correct_count = sum(answers.get(question["id"]) == question.get("correct_answer") for question in questions)
+    save_question_responses(
+        study_session=study_session,
+        assessment_session=session,
+        answers=answers,
+        response_events=state.get("responses") or [],
+        submitted_at=datetime.utcnow(),
+        total_time_spent=0.0,
+    )
+    correct_count = sum(
+        question["id"] in answers and answers[question["id"]] == question.get("correct_answer")
+        for question in questions
+    )
     total_points = sum(int(question.get("points", 10)) for question in questions)
-    earned_points = sum(int(question.get("points", 10)) for question in questions if answers.get(question["id"]) == question.get("correct_answer"))
+    earned_points = sum(
+        int(question.get("points", 10))
+        for question in questions
+        if question["id"] in answers and answers[question["id"]] == question.get("correct_answer")
+    )
     percentage = round((correct_count / TOTAL_QUESTIONS) * 100, 1)
     xp_earned = int(earned_points * 1.5)
     xp_result = _apply_xp(current_user, xp_earned, db)
@@ -503,7 +519,7 @@ def _finalize_assessment(
             # 1--5 remain separately and precisely logged.
             "crs": last_adaptive.get("crs"),
         },
-        "completion_status": "completed",
+        "completion_status": "timed_out" if allow_partial and len(answers) < TOTAL_QUESTIONS else "completed",
     }
     save_assessment_result(result)
     refresh_behavioral_summary(study_session["study_session_id"])
@@ -519,7 +535,7 @@ def _finalize_assessment(
     update_assessment_adaptive_state(
         session["id"],
         adaptive_state={**state, "final_result": result},
-        completion_status="completed",
+        completion_status=result["completion_status"],
     )
     return result
 
@@ -586,14 +602,26 @@ async def generate_assessment(
     # regenerates it correctly below instead of permanently serving a
     # truncated assessment for this study session.
     existing_session = get_canonical_assessment_session_for_study(study_session["study_session_id"])
-    if existing_session and len(existing_session.get("questions") or []) >= TOTAL_QUESTIONS:
-        return existing_session
+    if existing_session:
+        existing_question_count = len(existing_session.get("questions") or [])
+        if existing_question_count == TOTAL_QUESTIONS:
+            return existing_session
+        if existing_question_count > TOTAL_QUESTIONS:
+            raise HTTPException(
+                status_code=409,
+                detail="Persisted assessment exceeds the 10-question protocol and cannot be resumed.",
+            )
 
     # Protocol correction: MCRF is evaluated ONCE per assessment, from the
     # learner's MCRF/CRS state for the completed study session as a whole —
     # not re-evaluated per question. This single value governs all of
     # Q1-Q5; it is never recomputed from in-assessment answer correctness.
     transcript_text = completed_context["transcript_text"]
+    if not isinstance(transcript_text, str) or not transcript_text.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="A usable transcript is required before generating assessment questions.",
+        )
     attention_score = get_completed_video_behavioral_score(study_session["study_session_id"])
     durable_scores = get_recent_scores_pct(current_user.id, limit=5)
     initial = _decision_for_question(
@@ -738,7 +766,7 @@ async def submit_adaptive_answer(
         raise HTTPException(status_code=404, detail="Assessment session not found")
     if session.get("student_id") != current_user.id:
         raise HTTPException(status_code=403, detail="Not your session")
-    if session.get("completion_status") == "completed":
+    if session.get("completion_status") in {"completed", "timed_out"}:
         return {"completed": True, "session": session, "result": None}
     try:
         study_session = get_or_create_active_study_session(
@@ -766,25 +794,52 @@ async def submit_adaptive_answer(
     response_event = dict(request.response_event or {})
     response_event["question_id"] = request.question_id
     response_event["question_index"] = question_index
-    response = save_single_question_response(
-        study_session=study_session,
-        assessment_session=session,
-        question=question,
-        question_index=question_index,
-        answer=request.answer,
-        response_event=response_event,
-        submitted_at=datetime.utcnow(),
-        decision_method=method,
-    )
-    responses = list(state.get("responses") or []) + [response]
     answers[request.question_id] = request.answer
     answered_count = len(answers)
+    next_difficulty = None
+    if answered_count < TOTAL_QUESTIONS:
+        next_difficulty = (
+            state.get("mcrf_block_difficulty") or session.get("difficulty", "medium")
+            if answered_count < MCRF_QUESTION_COUNT
+            else state.get("legacy_block_difficulty") or session.get("difficulty", "medium")
+        )
+    response_state = {}
+
+    def build_response_state(saved_response):
+        responses = list(state.get("responses") or []) + [saved_response]
+        last_adaptive = state.get("last_adaptive_response") or {}
+        if next_difficulty is not None:
+            last_adaptive = {
+                **last_adaptive,
+                "next_assessment_difficulty": next_difficulty,
+                "crs": last_adaptive.get("crs"),
+            }
+        response_state["state"] = {
+            **state,
+            "answers": answers,
+            "responses": responses,
+            "answered_count": answered_count,
+            "last_adaptive_response": last_adaptive,
+        }
+        return response_state["state"]
+
+    try:
+        response = save_single_question_response(
+            study_session=study_session,
+            assessment_session=session,
+            question=question,
+            question_index=question_index,
+            answer=request.answer,
+            response_event=response_event,
+            submitted_at=datetime.utcnow(),
+            decision_method=method,
+            adaptive_state_factory=build_response_state,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    new_state = response_state["state"]
 
     if answered_count == TOTAL_QUESTIONS:
-        new_state = {**state, "answers": answers, "responses": responses, "answered_count": answered_count}
-        updated = update_assessment_adaptive_state(
-            session["id"], adaptive_state=new_state, completion_status="completed"
-        )
         result = _finalize_assessment(
             session={**session, "questions": questions},
             study_session=study_session,
@@ -792,7 +847,7 @@ async def submit_adaptive_answer(
             current_user=current_user,
             db=db,
         )
-        return {"completed": True, "session": updated, "result": result}
+        return {"completed": True, "session": get_assessment_session(session["id"]), "result": result}
 
     next_index = answered_count
 
@@ -803,24 +858,9 @@ async def submit_adaptive_answer(
     # simply read back from the frozen adaptive_state below. No answer's
     # correctness, response time, or outcome changes any subsequent
     # question's difficulty.
-    if next_index < MCRF_QUESTION_COUNT:
-        next_difficulty = state.get("mcrf_block_difficulty") or session.get("difficulty", "medium")
-    else:
-        next_difficulty = state.get("legacy_block_difficulty") or session.get("difficulty", "medium")
+    assert next_difficulty is not None
     crs_for_response = (state.get("last_adaptive_response") or {}).get("crs")
 
-    last_adaptive = {
-        **(state.get("last_adaptive_response") or {}),
-        "next_assessment_difficulty": next_difficulty,
-        "crs": crs_for_response,
-    }
-    new_state = {
-        **state,
-        "answers": answers,
-        "responses": responses,
-        "answered_count": answered_count,
-        "last_adaptive_response": last_adaptive,
-    }
     # All ten questions were generated and persisted together in /generate
     # and are never mutated afterward, so writing `questions=questions` back
     # here is safe (there is no concurrent background block that could add
@@ -829,8 +869,6 @@ async def submit_adaptive_answer(
         session["id"],
         questions=questions,
         selected_difficulty=next_difficulty,
-        adaptive_state=new_state,
-        completion_status="started",
     )
     # The next question already exists — it was generated up front in
     # /generate, along with all ten questions, before this assessment was
@@ -868,7 +906,7 @@ async def submit_assessment(
 
     state = dict(session.get("adaptive_state") or {})
 
-    if session.get("completion_status") == "completed":
+    if session.get("completion_status") in {"completed", "timed_out"}:
         # Idempotent: either the 10th /answer already finalized this
         # session, or a duplicate timeout call arrived (e.g. a retry). Both
         # cases must not call complete_study_session or re-finalize again.

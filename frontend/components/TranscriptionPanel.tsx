@@ -26,20 +26,6 @@ interface TranscriptionPanelProps {
   isPlaying: boolean
 }
 
-// Dummy segments for when backend is offline
-const DUMMY_SEGMENTS: TranscriptSegment[] = [
-  { id: "t1", text: "Welcome to this lesson on React fundamentals.", timestamp: "00:00", start_time: 0, end_time: 3, confidence: 0.97, model_response: { language: "en", words: [] } },
-  { id: "t2", text: "Today we'll explore how React uses a virtual DOM for efficient rendering.", timestamp: "00:04", start_time: 4, end_time: 8, confidence: 0.94, model_response: { language: "en", words: [] } },
-  { id: "t3", text: "Components are the building blocks of any React application.", timestamp: "00:09", start_time: 9, end_time: 12, confidence: 0.96, model_response: { language: "en", words: [] } },
-  { id: "t4", text: "You can think of components as reusable, self-contained pieces of UI.", timestamp: "00:13", start_time: 13, end_time: 17, confidence: 0.92, model_response: { language: "en", words: [] } },
-  { id: "t5", text: "There are two types: functional components and class components.", timestamp: "00:18", start_time: 18, end_time: 22, confidence: 0.95, model_response: { language: "en", words: [] } },
-  { id: "t6", text: "Modern React strongly favors functional components with hooks.", timestamp: "00:23", start_time: 23, end_time: 27, confidence: 0.93, model_response: { language: "en", words: [] } },
-  { id: "t7", text: "The useState hook lets you add state to functional components.", timestamp: "00:28", start_time: 28, end_time: 32, confidence: 0.96, model_response: { language: "en", words: [] } },
-  { id: "t8", text: "useEffect handles side effects like data fetching and subscriptions.", timestamp: "00:33", start_time: 33, end_time: 37, confidence: 0.91, model_response: { language: "en", words: [] } },
-  { id: "t9", text: "Props allow you to pass data from parent to child components.", timestamp: "00:38", start_time: 38, end_time: 42, confidence: 0.94, model_response: { language: "en", words: [] } },
-  { id: "t10", text: "The key prop helps React efficiently update lists by tracking identity.", timestamp: "00:43", start_time: 43, end_time: 47, confidence: 0.93, model_response: { language: "en", words: [] } },
-]
-
 export default function TranscriptionPanel({
   videoId,
   videoUrl,
@@ -49,6 +35,7 @@ export default function TranscriptionPanel({
   const [segments, setSegments] = useState<TranscriptSegment[]>([])
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null)
   const [isConnected, setIsConnected] = useState(false)
+  const [transcriptionError, setTranscriptionError] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
   const lastFetchTime = useRef<number>(-1)
@@ -80,6 +67,7 @@ export default function TranscriptionPanel({
     setSegments([])
     setActiveSegmentId(null)
     setIsConnected(false)
+    setTranscriptionError(false)
     lastFetchTime.current = -1
   }, [videoId])
 
@@ -98,8 +86,8 @@ export default function TranscriptionPanel({
     async function fetchFullTranscript(attempt: number) {
       try {
         // FIX: no timeout previously existed at all — a slow/stuck
-        // backend response left this fetch pending indefinitely with no
-        // fallback ever kicking in. 25s is generous enough for a genuine
+        // backend response left this fetch pending indefinitely. 25s is
+        // generous enough for a genuine
         // cold Faster-Whisper CPU transcription of a normal-length video.
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), 25000)
@@ -114,6 +102,7 @@ export default function TranscriptionPanel({
           if (cancelled) return
           setSegments(data)
           setIsConnected(true)
+          setTranscriptionError(false)
           // Only now — genuine success — is this video considered done.
           transcriptionInFlightFor.current.delete(videoId)
           transcriptionTriggeredFor.current.add(videoId)
@@ -127,8 +116,7 @@ export default function TranscriptionPanel({
         // retry could ever happen short of a full page reload. Bounded
         // retry (3 attempts, short backoff) instead, covering exactly
         // the case of a momentarily busy/slow backend right as playback
-        // starts. Only fall back to dummy segments — and give up
-        // retrying — after those attempts are exhausted.
+        // starts. Give up retrying after those attempts without inventing text.
         if (attempt < 3) {
           setTimeout(() => {
             if (!cancelled) fetchFullTranscript(attempt + 1)
@@ -136,8 +124,9 @@ export default function TranscriptionPanel({
           return
         }
         transcriptionInFlightFor.current.delete(videoId)
-        setSegments(DUMMY_SEGMENTS)
+        setSegments([])
         setIsConnected(false)
+        setTranscriptionError(true)
       }
     }
     fetchFullTranscript(1)
@@ -332,7 +321,9 @@ export default function TranscriptionPanel({
             })
           ) : (
             <div className="flex items-center justify-center h-32 text-[var(--text-muted)] text-xs">
-              Waiting for transcription data...
+              {transcriptionError
+                ? "Transcription failed. Assessment questions require a genuine transcript."
+                : "Waiting for transcription data..."}
             </div>
           )}
         </AnimatePresence>
@@ -357,7 +348,7 @@ export default function TranscriptionPanel({
 
       {/* Footer info */}
       <div className="px-4 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/30 text-[9px] text-[var(--text-muted)] flex justify-between">
-        <span>Model: Whisper {isConnected ? "(live)" : "(cached)"}</span>
+        <span>Model: Whisper {transcriptionError ? "(unavailable)" : isConnected ? "(live)" : "(cached)"}</span>
         <span>Lang: EN</span>
       </div>
     </motion.div>

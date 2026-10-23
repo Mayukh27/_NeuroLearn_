@@ -22,8 +22,8 @@ from ml.performance import compute_performance
 from ml.response_integrity import compute_response_integrity, TimingCategory
 from ml.trend import compute_trend
 from ml.content_complexity import compute_content_complexity
-from ml.crs import compute_crs
-from config.crs_config import CRS_CONFIG
+from ml.crs import compute_crs, _difficulty_from_crs
+from config.crs_config import CRS_CONFIG, CRSConfig, CRSWeights
 
 
 # ── Performance (P) ──────────────────────────────────────────────────
@@ -148,6 +148,13 @@ def test_complexity_score_bounded():
 def test_crs_weights_sum_to_one():
     w = CRS_CONFIG.weights
     assert (w.alpha + w.beta + w.gamma + w.delta + w.epsilon) == pytest.approx(1.0)
+    assert [w.alpha, w.beta, w.gamma, w.delta, w.epsilon] == [0.2] * 5
+
+
+@pytest.mark.parametrize("weight", [float("nan"), float("inf"), -0.1, 1.1])
+def test_crs_rejects_invalid_weights(weight):
+    with pytest.raises(ValueError, match="weights must be finite"):
+        compute_crs(config=CRSConfig(weights=CRSWeights(alpha=weight)))
 
 
 def test_crs_all_neutral_inputs_lands_in_medium_band():
@@ -208,6 +215,44 @@ def test_crs_missing_timing_does_not_penalize_pre_assessment():
     result = compute_crs(recent_scores_pct=[70, 72, 71], attention_score_pct=70)
     assert result.components.integrity == 0.5
     assert result.detail["integrity"]["source"] == "default"
+
+
+@pytest.mark.parametrize(("score", "expected"), [
+    (0.449999, "easy"), (0.45, "medium"), (0.450001, "medium"),
+    (0.749999, "medium"), (0.75, "medium"), (0.750001, "hard"),
+])
+def test_crs_difficulty_threshold_boundaries(score, expected):
+    assert _difficulty_from_crs(score, CRS_CONFIG) == expected
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"attention_score_pct": -0.01}, {"attention_score_pct": 100.01},
+    {"attention_score_pct": float("nan")}, {"attention_score_pct": float("inf")},
+    {"recent_scores_pct": [-1]}, {"recent_scores_pct": [101]},
+    {"recent_scores_pct": [float("nan")]}, {"recent_scores_pct": [float("inf")]},
+    {"time_spent": 1}, {"time_spent": -1, "time_limit": 10},
+    {"time_spent": float("inf"), "time_limit": 10},
+    {"time_spent": 1, "time_limit": 0},
+    {"time_spent": 1, "time_limit": float("nan")},
+    {"time_spent": 1, "time_limit": float("inf")},
+    {"time_spent": 1e308, "time_limit": 5e-324},
+    {"transcript_text": 1}, {"was_correct": "yes"},
+])
+def test_crs_rejects_invalid_or_out_of_range_inputs(kwargs):
+    with pytest.raises(ValueError):
+        compute_crs(**kwargs)
+
+
+def test_crs_accepts_component_endpoints_without_clipping():
+    result = compute_crs(recent_scores_pct=[0, 100], attention_score_pct=0)
+    assert 0.0 <= result.components.performance <= 1.0
+    assert 0.0 <= result.components.behavioral_cue <= 1.0
+    assert 0.0 <= result.components.trend <= 1.0
+    components = result.components
+    assert result.crs == pytest.approx(0.2 * (
+        components.performance + components.behavioral_cue + components.integrity
+        + components.trend + components.complexity
+    ), abs=0.0001)
 
 
 if __name__ == "__main__":

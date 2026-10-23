@@ -14,8 +14,9 @@ authentication or that were silently not persisting XP were changed
 (routers/student.py, routers/assessment.py, routers/gamification.py,
 routers/auth.py — new).
 """
-from typing import Optional
+from typing import Callable, Optional
 from datetime import datetime, date, timedelta
+import math
 import statistics
 import subprocess
 import uuid
@@ -1444,10 +1445,10 @@ def save_question_responses(
     submitted_at: datetime,
     total_time_spent: float,
     decision_method: Optional[str] = None,
+    adaptive_state_factory: Optional[Callable[[dict], dict]] = None,
 ) -> list[dict]:
     questions = assessment_session.get("questions", [])
     events = {e.get("question_id"): e for e in (response_events or []) if e.get("question_id")}
-    fallback_per_question = total_time_spent / max(len(questions), 1)
     rows_out = []
     db = _session()
     try:
@@ -1466,20 +1467,20 @@ def save_question_responses(
                 )
             ).scalar_one_or_none()
             submitted_answer = answers.get(question_id)
-            status = event.get("status")
-            if status is None:
-                status = "submitted" if submitted_answer is not None else "unanswered"
+            status = "submitted" if submitted_answer is not None else "unanswered"
             presented = _parse_dt(event.get("presented_at"))
             submitted = _parse_dt(event.get("submitted_at")) or (submitted_at if submitted_answer is not None else None)
             response_time = event.get("response_time_seconds")
-            if response_time is None:
-                response_time = fallback_per_question if submitted_answer is not None else None
+            # A missing client measurement stays missing; dividing total
+            # session duration among questions would fabricate item timing.
             try:
-                response_time = None if response_time is None else max(0.0, float(response_time))
+                response_time = None if response_time is None else float(response_time)
             except (TypeError, ValueError):
-                response_time = None
+                raise ValueError("response_time_seconds must be a finite non-negative number")
+            if response_time is not None and (not math.isfinite(response_time) or response_time < 0):
+                raise ValueError("response_time_seconds must be a finite non-negative number")
             correct = None
-            points = 0.0
+            points = None
             if submitted_answer is not None:
                 correct = submitted_answer == q.get("correct_answer")
                 points = float(q.get("points", 10) if correct else 0)
@@ -1518,6 +1519,11 @@ def save_question_responses(
                 "correctness": correct,
                 "status": status,
             })
+        if adaptive_state_factory is not None:
+            persisted_assessment = db.get(AssessmentSession, assessment_session["id"])
+            if not persisted_assessment:
+                raise ValueError("Assessment session not found while saving response")
+            persisted_assessment.adaptive_state = adaptive_state_factory(rows_out[0])
         db.commit()
     finally:
         db.close()
@@ -1534,6 +1540,7 @@ def save_single_question_response(
     response_event: Optional[dict],
     submitted_at: datetime,
     decision_method: Optional[str] = None,
+    adaptive_state_factory: Optional[Callable[[dict], dict]] = None,
 ) -> dict:
     event = dict(response_event or {})
     event.setdefault("question_id", question["id"])
@@ -1544,8 +1551,9 @@ def save_single_question_response(
         answers={question["id"]: answer},
         response_events=[event],
         submitted_at=submitted_at,
-        total_time_spent=float(event.get("response_time_seconds") or 0),
+        total_time_spent=0.0,
         decision_method=decision_method,
+        adaptive_state_factory=adaptive_state_factory,
     )
     return rows[0]
 

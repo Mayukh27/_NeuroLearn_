@@ -11,10 +11,11 @@ Endpoints:
 import functools
 
 import anyio
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 from schemas.models import TranscriptSegment, TranscriptionRequest
 from ml import transcription_service
+from ml.transcription_model import TranscriptionError
 
 router = APIRouter(prefix="/api/transcription", tags=["Transcription"])
 
@@ -53,11 +54,14 @@ async def get_full_transcript(
     # run off the event loop (see _run_detached) so this request neither
     # blocks other API requests while running, nor blocks server shutdown
     # if it's still in flight when the server stops.
-    return await _run_detached(
-        transcription_service.get_full_transcript,
-        video_id,
-        video_url=video_url,
-    )
+    try:
+        return await _run_detached(
+            transcription_service.get_full_transcript,
+            video_id,
+            video_url=video_url,
+        )
+    except TranscriptionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 @router.get("/{video_id}/live")
 async def get_live_segment(
@@ -85,11 +89,14 @@ async def get_live_segment(
         # Same reasoning as get_full_transcript above — the first poll for a
         # given video can trigger the same long transcribe job
         # (transcription_service.get_segment_at_time -> transcribe_video_url).
-        segment = await _run_detached(
-            transcription_service.get_segment_at_time,
-            current_time,
-            video_url=video_url,
-        )
+        try:
+            segment = await _run_detached(
+                transcription_service.get_segment_at_time,
+                current_time,
+                video_url=video_url,
+            )
+        except TranscriptionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if segment:
         return segment
@@ -113,24 +120,30 @@ async def transcribe_audio_chunk(request: TranscriptionRequest):
         3. Sends to this endpoint
         4. Whisper processes → returns text
 
-    Falls back to dummy data if Whisper not installed.
+    Returns an explicit service error if Whisper is unavailable or produces no text.
     """
     if request.audio_chunk_base64:
         # Bounded, single-chunk work — not the long-running whole-video
         # job, so it keeps the existing run_in_threadpool behavior.
-        segments = await run_in_threadpool(
-            transcription_service.transcribe_audio_chunk,
-            request.audio_chunk_base64,
-        )
+        try:
+            segments = await run_in_threadpool(
+                transcription_service.transcribe_audio_chunk,
+                request.audio_chunk_base64,
+            )
+        except TranscriptionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"video_id": request.video_id, "segments": segments}
 
     if request.video_url:
         # This path runs the same long-running whole-video job as the
         # endpoints above, so it needs the same detachable execution.
-        segments = await _run_detached(
-            transcription_service.transcribe_video_url,
-            request.video_url,
-        )
+        try:
+            segments = await _run_detached(
+                transcription_service.transcribe_video_url,
+                request.video_url,
+            )
+        except TranscriptionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"video_id": request.video_id, "segments": segments}
 
     return {"error": "Provide either audio_chunk_base64 or video_url"}

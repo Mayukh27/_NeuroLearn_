@@ -15,6 +15,7 @@ not just as symbols in the manuscript.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+import math
 from typing import Dict
 
 
@@ -41,6 +42,8 @@ class CRSWeights:
         return asdict(self)
 
     def validate(self) -> None:
+        if any(not math.isfinite(weight) or not 0.0 <= weight <= 1.0 for weight in self.as_dict().values()):
+            raise ValueError(f"CRS weights must be finite values in [0, 1]. Weights: {self.as_dict()}")
         total = self.alpha + self.beta + self.gamma + self.delta + self.epsilon
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
